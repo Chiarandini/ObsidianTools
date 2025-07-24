@@ -22,7 +22,7 @@ ObsidianTools is designed to enhance the management of tags and notes within Obs
 ```lua
 -- in lazy
 {
-    'yourusername/ObsidianTools',
+    'Chiarandini/ObsidianTools',
     config = function()
         require('ObsidianTools').setup({
             workspacePath = '/absolute/path/to/obsidian/workspace',
