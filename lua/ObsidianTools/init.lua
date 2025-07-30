@@ -158,24 +158,40 @@ end
 
 --- Helper function to set up common keymaps for windows
 local function setup_window_keymaps(buf, callbacks)
-    local modes = {'i', 'n'}
-    local keys = {
+    -- Mappings that apply to both insert and normal mode
+    local shared_keys = {
         ['<CR>'] = callbacks.proceed,
-        ['<Esc>'] = callbacks.close,
         ['<C-t>'] = callbacks.tab,
-        ['<C-v>'] = callbacks.vsplit
+        ['<C-v>'] = callbacks.vsplit,
     }
 
-    for _, mode in ipairs(modes) do
-        for key, callback in pairs(keys) do
+    for _, mode in ipairs({ 'i', 'n' }) do
+        for key, callback in pairs(shared_keys) do
             if callback then
                 vim.api.nvim_buf_set_keymap(buf, mode, key, '', {
                     noremap = true,
                     silent = true,
-                    callback = callback
+                    callback = callback,
                 })
             end
         end
+    end
+
+    -- In insert mode, <Esc> should just take us to normal mode.
+    vim.api.nvim_buf_set_keymap(buf, 'i', '<Esc>', '<C-\\><C-n>', {
+        noremap = true,
+        silent = true,
+        desc = 'Exit to normal mode',
+    })
+
+    -- In normal mode, 'q' should close the window.
+    if callbacks.close then
+        vim.api.nvim_buf_set_keymap(buf, 'n', 'q', '', {
+            noremap = true,
+            silent = true,
+            callback = callbacks.close,
+            desc = 'Close window',
+        })
     end
 end
 
@@ -231,33 +247,54 @@ local function create_note_final(filename, tags, link_text, open_cmd, subdirecto
     local obsidian = getObsidian()
     if not obsidian then return end
 
-    local client = obsidian.get_client()
+    local Note = obsidian.Note
+    if not Note or not Note.create then
+        vim.notify("Could not find `obsidian.Note.create`. Please check your obsidian.nvim version.", vim.log.levels.ERROR)
+        return
+    end
+
     local save_path = join_paths(M.workspacePath, subdirectory)
 
-    local note = client:create_note({
+    local note = Note.create({
         title = filename,
         dir = save_path,
         tags = tags,
     })
 
+    if not note or not note.path or not note.path.filename then
+        vim.notify("Failed to create note or note path is missing.", vim.log.levels.ERROR)
+        return
+    end
+
     vim.notify("Note created: " .. filename, vim.log.levels.INFO)
 
-    -- Open the file based on the command
-    local cmd_map = {
-        tab = "tabedit",
-        vsplit = "vsplit",
-        edit = "edit"
+    local new_buf_cmd_map = {
+        tab = "tabnew",
+        vsplit = "vnew",
+        edit = "enew"
     }
-    vim.cmd((cmd_map[open_cmd] or "edit") .. " " .. note.path["filename"])
+    vim.cmd(new_buf_cmd_map[open_cmd] or "enew")
 
-    -- Add link if provided
+    local bufnr = vim.api.nvim_get_current_buf()
+
+    vim.api.nvim_buf_set_name(bufnr, note.path.filename)
+
+    vim.bo[bufnr].filetype = 'markdown'
+
+    note:write_to_buffer({ bufnr = bufnr })
+
     if link_text then
         vim.defer_fn(function()
-            local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+            if vim.api.nvim_get_current_buf() ~= bufnr then
+                vim.notify("Buffer changed before link could be inserted.", vim.log.levels.WARN)
+                return
+            end
+
+            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
             for i, line in ipairs(lines) do
                 if i > 1 and line:match("^---$") then
-                    local link_content = {"", "[[" .. link_text .. "]]", ""}
-                    vim.api.nvim_buf_set_lines(0, i, i, false, link_content)
+                    local link_content = {"", "[[" .. link_text .. "]]"}
+                    vim.api.nvim_buf_set_lines(bufnr, i, i, false, link_content)
                     break
                 end
             end
@@ -276,7 +313,7 @@ local function create_tags_window(filename, link_text, subdirectory)
         "press ENTER <cr> to create and open the file",
         "Press <c-t> to create and open the new file in a new tab",
         "Press <c-v> to create and open the file in a vertical split",
-        "Press <esc> to quit"
+        "Press <esc> to go to normal mode, then 'q' to quit"
     }
 
     vim.api.nvim_buf_set_lines(tags_buf, 0, -1, false, lines)
@@ -389,7 +426,7 @@ local function create_filename_window(subdirectory)
         "save location: " .. save_location,
         "",
         "Press enter <cr> to continue and choose tags",
-        "Press <esc> to quit"
+        "Press <esc> to go to normal mode, then 'q' to quit"
     }
 
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -634,15 +671,6 @@ function M.addTagsFromList(tag_lists)
 		:find()
 end
 
---- Opens the Obsidian tag search to browse all tags in the vault
-function M.searchTags()
-	local obsidian = getObsidian()
-	if not obsidian then
-		return
-	end
-	local client = obsidian.get_client()
-	client:command("tags", {})
-end
 
 
 -- Function to extract hashtags from a line
@@ -840,26 +868,29 @@ local function process_directory(directory_path)
     end
 end
 
--- Main function
 function M.convert_hashtags()
-    -- Get directory from user
-    local directory = vim.fn.input("Enter directory path (or press Enter for current): ")
+    vim.ui.input({ prompt = "Enter directory path (or press Enter for current): " }, function(directory)
+        -- User pressed <Esc>
+        if not directory then
+            print("Operation cancelled.")
+            return
+        end
 
-    -- Use current directory if empty
-    if directory == "" then
-        directory = "."
-    end
+        if directory == "" then
+            directory = "."
+        end
 
-    print("\nProcessing directory: " .. vim.fn.fnamemodify(directory, ":p"))
+        print("\nProcessing directory: " .. vim.fn.fnamemodify(directory, ":p"))
 
-    -- Ask for confirmation
-    local confirm = vim.fn.input("Proceed? This will modify your files. (y/N): ")
+        vim.ui.input({ prompt = "Proceed? This will modify your files. (y/N): " }, function(confirm)
+            if not confirm or confirm:lower() ~= 'y' and confirm:lower() ~= 'yes' then
+                print("Operation cancelled.")
+                return
+            end
 
-    if confirm:lower() == "y" or confirm:lower() == "yes" then
-        process_directory(directory)
-    else
-        print("Operation cancelled.")
-    end
+            process_directory(directory)
+        end)
+    end)
 end
 
 
