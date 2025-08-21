@@ -163,6 +163,7 @@ local function setup_window_keymaps(buf, callbacks)
         ['<CR>'] = callbacks.proceed,
         ['<C-t>'] = callbacks.tab,
         ['<C-v>'] = callbacks.vsplit,
+        ['<C-c>'] = callbacks.save,
     }
 
     for _, mode in ipairs({ 'i', 'n' }) do
@@ -266,8 +267,34 @@ local function create_note_final(filename, tags, link_text, open_cmd, subdirecto
         return
     end
 
-    vim.notify("Note created: " .. filename, vim.log.levels.INFO)
+    if open_cmd == 'save' then
+        -- Create a temporary buffer to build the file content
+        local temp_buf = vim.api.nvim_create_buf(false, true) -- not listed, scratch
+        note:write_to_buffer({ bufnr = temp_buf })
 
+        if link_text then
+            local lines = vim.api.nvim_buf_get_lines(temp_buf, 0, -1, false)
+            for i, line in ipairs(lines) do
+                if i > 1 and line:match("^---$") then
+                    local link_content = {"", "[[" .. link_text .. "]]"}
+                    vim.api.nvim_buf_set_lines(temp_buf, i, i, false, link_content)
+                    break
+                end
+            end
+        end
+
+        -- Write the buffer content to the file
+        local file_content = vim.api.nvim_buf_get_lines(temp_buf, 0, -1, false)
+        vim.fn.writefile(file_content, note.path.filename)
+
+        -- Clean up the temporary buffer
+        vim.api.nvim_buf_delete(temp_buf, { force = true })
+
+        vim.notify("Note saved: " .. vim.fn.fnamemodify(note.path.filename, ":t"), vim.log.levels.INFO)
+        return
+    end
+
+    -- Original behavior: open the note
     local new_buf_cmd_map = {
         tab = "tabnew",
         vsplit = "vnew",
@@ -282,6 +309,8 @@ local function create_note_final(filename, tags, link_text, open_cmd, subdirecto
     vim.bo[bufnr].filetype = 'markdown'
 
     note:write_to_buffer({ bufnr = bufnr })
+
+    vim.notify("Note created: " .. filename, vim.log.levels.INFO)
 
     if link_text then
         vim.defer_fn(function()
@@ -304,7 +333,7 @@ end
 
 --- Common function to create tags window
 local function create_tags_window(filename, link_text, subdirectory)
-    local tags_buf, tags_win = create_centered_window(80, 15, 'Select Tags')
+    local tags_buf, tags_win = create_centered_window(80, 16, 'Select Tags')
 
     local lines = {
         "Tags: ",
@@ -313,6 +342,7 @@ local function create_tags_window(filename, link_text, subdirectory)
         "press ENTER <cr> to create and open the file",
         "Press <c-t> to create and open the new file in a new tab",
         "Press <c-v> to create and open the file in a vertical split",
+        "Press <c-c> to create and save the file without opening",
         "Press <esc> to go to normal mode, then 'q' to quit"
     }
 
@@ -401,7 +431,8 @@ local function create_tags_window(filename, link_text, subdirectory)
         proceed = function() create_note("edit") end,
         close = close_tags_window,
         tab = function() create_note("tab") end,
-        vsplit = function() create_note("vsplit") end
+        vsplit = function() create_note("vsplit") end,
+        save = function() create_note("save") end
     })
 
     vim.api.nvim_create_autocmd({"BufLeave", "WinLeave"}, {
@@ -678,7 +709,7 @@ local function extract_hashtags(line)
     local hashtags = {}
 
     -- Match # followed by any characters until next # or end of line
-    for hashtag in string.gmatch(line, "#([^#\n]+)") do
+    for hashtag in string.gmatch(line, "#([^#\\n]+)") do
         -- Trim whitespace from both ends
         local cleaned_tag = hashtag:gsub("^%s*", ""):gsub("%s*$", "")
 
@@ -856,7 +887,7 @@ local function process_directory(directory_path)
         -- "skip" status (files with frontmatter) are not added to quickfix
     end
 
-    print("\nProcessed " .. processed_count .. " out of " .. #md_files .. " files")
+    print("\\nProcessed " .. processed_count .. " out of " .. #md_files .. " files")
     if no_tags_count > 0 then
         print(no_tags_count .. " files found with no tags")
     end
@@ -880,7 +911,7 @@ function M.convert_hashtags()
             directory = "."
         end
 
-        print("\nProcessing directory: " .. vim.fn.fnamemodify(directory, ":p"))
+        print("\\nProcessing directory: " .. vim.fn.fnamemodify(directory, ":p"))
 
         vim.ui.input({ prompt = "Proceed? This will modify your files. (y/N): " }, function(confirm)
             if not confirm or confirm:lower() ~= 'y' and confirm:lower() ~= 'yes' then
